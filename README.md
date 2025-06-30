@@ -1,6 +1,6 @@
 # ptp4l management client in golang #
 This is an experimental project written with the help of Cursor AI editor. It implements a simple and limited PTP management client in the Go language.
-The purpose of the project is to provide notifications to event-driven applications in Go. This is just a playground and proof of concept.
+The purpose of the project is to provide notifications to event-driven applications in Go. This is just a proof of concept, use on your own risk.
 
 ## Build ##
 ```bash
