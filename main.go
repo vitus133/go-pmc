@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	ptp "ptp4l-monitor/pkg/ptp"
 
@@ -13,11 +14,17 @@ import (
 )
 
 var (
-	udsPath    string
-	domain     int
-	targetPort int
-	verbose    bool
-	rootCmd    *cobra.Command
+	udsPath        string
+	domain         int
+	targetPort     int
+	verbose        bool
+	requestTimeout int // Subscription request timeout in seconds
+	// Subscription event flags
+	subscribePortState     bool // Subscribe to port state changes
+	subscribeTimeSync      bool // Subscribe to time synchronization events
+	subscribeParentDataSet bool // Subscribe to parent data set changes
+	subscribeAll           bool // Subscribe to all available events
+	rootCmd                *cobra.Command
 )
 
 func init() {
@@ -57,7 +64,7 @@ Examples:
   ptp4l-monitor set EXTERNAL_GRANDMASTER_PROPERTIES_NP 50:7c:6f:ff:fe:1f:b2:18 1
   
   # Monitoring
-  ptp4l-monitor monitor
+  ptp4l-monitor subscribe                  # Subscription-based real-time monitoring
   
   # Using different socket/domain
   ptp4l-monitor --uds /var/run/ptp4l.0.socket --domain 0 get DEFAULT_DATA_SET
@@ -68,11 +75,12 @@ Examples:
 	rootCmd.PersistentFlags().StringVarP(&udsPath, "uds", "s", "/var/run/ptp4l.1.socket", "Path to ptp4l UDS socket")
 	rootCmd.PersistentFlags().IntVarP(&domain, "domain", "d", 24, "PTP domain number")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
+	rootCmd.PersistentFlags().IntVarP(&requestTimeout, "timeout", "t", 30, "Subscription request timeout in seconds")
 
 	// Add subcommands
 	rootCmd.AddCommand(getCmd)
 	rootCmd.AddCommand(setCmd)
-	rootCmd.AddCommand(monitorCmd)
+	rootCmd.AddCommand(subscribeCmd)
 }
 
 var getCmd = &cobra.Command{
@@ -116,15 +124,34 @@ Examples:
 	Run:  runSet,
 }
 
-var monitorCmd = &cobra.Command{
-	Use:   "monitor",
-	Short: "Continuously monitor PTP4L status",
-	Long:  `Start continuous monitoring of PTP4L status, updating every few seconds.`,
-	Run:   runMonitor,
+var subscribeCmd = &cobra.Command{
+	Use:   "subscribe",
+	Short: "Subscribe to PTP4L status updates",
+	Long: `Subscribe to real-time updates of PTP4L status changes.
+
+Event Subscription Options:
+  --port-events     Subscribe to port state changes (default: true)
+  --time-events     Subscribe to time synchronization events (default: false)
+  --parent-events   Subscribe to parent data set change events (default: false)
+  --all-events      Subscribe to all available notification types (overrides others)
+
+Examples:
+  ptp4l-monitor subscribe                             # Port state changes only (default)
+  ptp4l-monitor subscribe --time-events              # Port state + time sync events
+  ptp4l-monitor subscribe --parent-events            # Port state + parent data set events
+  ptp4l-monitor subscribe --all-events               # All notification types
+  ptp4l-monitor subscribe --time-events --parent-events   # Time sync + parent events`,
+	Run: runSubscribe,
 }
 
 func init() {
 	getCmd.Flags().IntVarP(&targetPort, "port", "p", 0, "Target port number (0 = all ports)")
+
+	// Subscription event flags for subscribe command
+	subscribeCmd.Flags().BoolVar(&subscribePortState, "port-events", true, "Subscribe to port state change notifications")
+	subscribeCmd.Flags().BoolVar(&subscribeTimeSync, "time-events", false, "Subscribe to time synchronization notifications")
+	subscribeCmd.Flags().BoolVar(&subscribeParentDataSet, "parent-events", false, "Subscribe to parent data set change notifications")
+	subscribeCmd.Flags().BoolVar(&subscribeAll, "all-events", false, "Subscribe to all available notification types")
 }
 
 func runGet(cmd *cobra.Command, args []string) {
@@ -342,8 +369,41 @@ func getSimpleValue(client *ptp.Client, managementID uint16, name string) {
 	}
 }
 
-func runMonitor(cmd *cobra.Command, args []string) {
-	fmt.Println("Starting PTP4L continuous monitoring... (Press Ctrl+C to stop)")
+func runSubscribe(cmd *cobra.Command, args []string) {
+	// Determine which events to subscribe to based on flags
+	var events []uint8
+	if subscribeAll {
+		events = []uint8{ptp.NOTIFY_PORT_STATE, ptp.NOTIFY_TIME_SYNC, ptp.NOTIFY_PARENT_DATA_SET}
+	} else {
+		if subscribePortState {
+			events = append(events, ptp.NOTIFY_PORT_STATE)
+		}
+		if subscribeTimeSync {
+			events = append(events, ptp.NOTIFY_TIME_SYNC)
+		}
+		if subscribeParentDataSet {
+			events = append(events, ptp.NOTIFY_PARENT_DATA_SET)
+		}
+
+		// Default to port state if no events specified
+		if len(events) == 0 {
+			events = append(events, ptp.NOTIFY_PORT_STATE)
+		}
+	}
+
+	eventNames := []string{}
+	for _, event := range events {
+		switch event {
+		case ptp.NOTIFY_PORT_STATE:
+			eventNames = append(eventNames, "PORT_STATE")
+		case ptp.NOTIFY_TIME_SYNC:
+			eventNames = append(eventNames, "TIME_SYNC")
+		case ptp.NOTIFY_PARENT_DATA_SET:
+			eventNames = append(eventNames, "PARENT_DATA_SET")
+		}
+	}
+
+	fmt.Printf("Starting PTP4L subscription monitoring for events: %v... (Press Ctrl+C to stop)\n", eventNames)
 
 	if verbose {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -357,15 +417,59 @@ func runMonitor(cmd *cobra.Command, args []string) {
 	}
 	defer client.Close()
 
-	// Create monitor
-	monitor := ptp.NewMonitor(client)
+	// Create subscription manager directly for more control
+	sm := ptp.NewSubscriptionManager(client, verbose)
 
-	// Use context for graceful shutdown
-	ctx := cmd.Context()
-	if err := monitor.Start(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Monitor failed: %v\n", err)
+	// Configure timeout if specified
+	if requestTimeout > 0 {
+		sm.SetRequestTimeout(time.Duration(requestTimeout) * time.Second)
+	}
+
+	// Set up callbacks
+	sm.OnPortStateChange(func(event ptp.PortStateChangeEvent) {
+		fmt.Printf("\n🔔 PORT STATE CHANGE\n")
+		fmt.Printf("Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+		fmt.Printf("Port: %s\n", event.PortIdentity.String())
+		fmt.Printf("New State: %s\n", ptp.PortStateString(event.NewState))
+	})
+
+	sm.OnParentDataSetChange(func(event ptp.ParentDataSetChangeEvent) {
+		fmt.Printf("\n👑 PARENT DATA SET CHANGE\n")
+		fmt.Printf("Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+		fmt.Printf("Parent Port: %s\n", event.ParentPortIdentity.String())
+		fmt.Printf("Grandmaster: %s\n", event.GrandmasterIdentity.String())
+		fmt.Printf("Grandmaster Class: %d\n", event.GrandmasterClockQuality.ClockClass)
+		fmt.Printf("Grandmaster Priority1: %d\n", event.GrandmasterPriority1)
+		fmt.Printf("Grandmaster Priority2: %d\n", event.GrandmasterPriority2)
+	})
+
+	sm.OnTimeStatusChange(func(event ptp.TimeStatusChangeEvent) {
+		fmt.Printf("\n🕐 TIME STATUS UPDATE\n")
+		fmt.Printf("Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+
+		fmt.Printf("Master Offset: %d ns\n", event.MasterOffset)
+
+		fmt.Printf("Ingress Time: %d ns\n", event.IngressTime)
+		fmt.Printf("Rate Offset: %d\n", event.CumulativeScaledRateOffset)
+		fmt.Printf("GM Present: %t\n", event.GmPresent)
+		if event.GmPresent {
+			fmt.Printf("GM Identity: %s\n", event.GmIdentity.String())
+		}
+	})
+
+	// Subscribe to the specified events
+	if err := sm.SubscribeToEvents(10*time.Second, events...); err != nil {
+		fmt.Fprintf(os.Stderr, "Subscription failed: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Wait for context cancellation
+	ctx := cmd.Context()
+	<-ctx.Done()
+
+	// Clean up
+	sm.Unsubscribe()
+	fmt.Println("\nSubscription monitoring stopped")
 }
 
 func runSet(cmd *cobra.Command, args []string) {

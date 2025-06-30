@@ -31,8 +31,12 @@ type Client struct {
 
 // Monitor provides monitoring functionality for ptp4l
 type Monitor struct {
-	client   *Client
-	interval time.Duration
+	client              *Client
+	interval            time.Duration
+	subscription        *SubscriptionManager
+	portStates          map[uint16]uint8 // track port states for change detection
+	subscriptionTimeout time.Duration    // timeout for subscription requests
+	mu                  sync.RWMutex
 }
 
 // NewClient creates a new ptp4l client
@@ -257,8 +261,10 @@ func (c *Client) GetExternalGrandmasterPropertiesNP() (*ExternalGrandmasterPrope
 // NewMonitor creates a new monitor instance
 func NewMonitor(client *Client) *Monitor {
 	return &Monitor{
-		client:   client,
-		interval: 2 * time.Second, // Default monitoring interval
+		client:              client,
+		interval:            2 * time.Second,  // Default monitoring interval
+		subscriptionTimeout: 30 * time.Second, // Default subscription timeout
+		portStates:          make(map[uint16]uint8),
 	}
 }
 
@@ -267,7 +273,18 @@ func (m *Monitor) SetInterval(interval time.Duration) {
 	m.interval = interval
 }
 
-// Start begins monitoring ptp4l status
+// SetSubscriptionTimeout sets the subscription request timeout
+func (m *Monitor) SetSubscriptionTimeout(timeout time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.subscriptionTimeout = timeout
+	if m.subscription != nil {
+		m.subscription.SetRequestTimeout(timeout)
+	}
+}
+
+// Start begins monitoring ptp4l status (polling-based, for backward compatibility)
 func (m *Monitor) Start(ctx context.Context) error {
 	log.Println("Starting PTP4L monitoring...")
 
@@ -290,6 +307,67 @@ func (m *Monitor) Start(ctx context.Context) error {
 				// Continue monitoring even if one attempt fails
 			}
 		}
+	}
+}
+
+// StartSubscriptionMonitoring starts monitoring using subscriptions for real-time updates
+func (m *Monitor) StartSubscriptionMonitoring(ctx context.Context) error {
+	log.Println("Starting PTP4L subscription-based monitoring...")
+
+	// Create subscription manager
+	m.subscription = NewSubscriptionManager(m.client, m.client.verbose)
+
+	// Apply stored timeout
+	m.mu.RLock()
+	timeout := m.subscriptionTimeout
+	m.mu.RUnlock()
+	m.subscription.SetRequestTimeout(timeout)
+
+	// Set up port state change callback
+	m.subscription.OnPortStateChange(func(event PortStateChangeEvent) {
+		m.handlePortStateChange(event)
+	})
+
+	// Subscribe to notifications
+	if err := m.subscription.Subscribe(10 * time.Second); err != nil {
+		return fmt.Errorf("failed to start subscription: %v", err)
+	}
+
+	// Wait for initial port discovery and print status
+	time.Sleep(1 * time.Second)
+	if err := m.printStatus(); err != nil {
+		log.Printf("Failed to get initial status: %v", err)
+	}
+
+	// Wait for context cancellation
+	<-ctx.Done()
+
+	// Clean up
+	m.subscription.Unsubscribe()
+	log.Println("Subscription monitoring stopped")
+	return ctx.Err()
+}
+
+// handlePortStateChange processes port state change events
+func (m *Monitor) handlePortStateChange(event PortStateChangeEvent) {
+	m.mu.Lock()
+	oldState := m.portStates[event.PortIdentity.PortNumber]
+	m.portStates[event.PortIdentity.PortNumber] = event.NewState
+	m.mu.Unlock()
+
+	fmt.Printf("\n--- PORT STATE CHANGE ---\n")
+	fmt.Printf("Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Printf("Port: %s\n", event.PortIdentity.String())
+	if oldState != 0 {
+		fmt.Printf("State: %s -> %s\n", PortStateString(oldState), PortStateString(event.NewState))
+	} else {
+		fmt.Printf("State: %s\n", PortStateString(event.NewState))
+	}
+
+	// Print full status after state change
+	fmt.Println("\n--- Updated Status ---")
+	if err := m.printStatus(); err != nil {
+		log.Printf("Failed to print updated status: %v", err)
 	}
 }
 
@@ -635,4 +713,14 @@ func (c *Client) GetTimePropertiesDataSet() (*TimePropertiesDataSet, error) {
 	tpds.PtpTimescale = (flags & 0x20) != 0
 
 	return tpds, nil
+}
+
+// ConstructSubscriptionMessage constructs a SUBSCRIBE_EVENTS_NP message for external use
+func (c *Client) ConstructSubscriptionMessage(payload []byte) []byte {
+	return c.constructPMCMessage(MID_SUBSCRIBE_EVENTS_NP, 0, SET, payload)
+}
+
+// GetUDSPath returns the UDS path for external use
+func (c *Client) GetUDSPath() string {
+	return c.udsPath
 }

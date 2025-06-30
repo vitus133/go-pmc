@@ -83,12 +83,12 @@ const (
 	MID_TIME_STATUS_NP                     = 0xC000
 	MID_GRANDMASTER_SETTINGS_NP            = 0xC001
 	MID_CLOCK_DESCRIPTION_NP               = 0xC002
-	MID_PORT_DATA_SET_NP                   = 0xC003
-	MID_SUBSCRIBE_EVENTS_NP                = 0xC004
-	MID_PORT_PROPERTIES_NP                 = 0xC005
-	MID_PORT_STATS_NP                      = 0xC006
-	MID_SYNCHRONIZATION_UNCERTAIN_NP       = 0xC007
-	MID_PORT_SERVICE_STATS_NP              = 0xC008
+	MID_PORT_DATA_SET_NP                   = 0xC002
+	MID_SUBSCRIBE_EVENTS_NP                = 0xC003
+	MID_PORT_PROPERTIES_NP                 = 0xC004
+	MID_PORT_STATS_NP                      = 0xC005
+	MID_SYNCHRONIZATION_UNCERTAIN_NP       = 0xC006
+	MID_PORT_SERVICE_STATS_NP              = 0xC007
 	MID_UNICAST_MASTER_TABLE_NP            = 0xC009
 	MID_PORT_HWCLOCK_NP                    = 0xC00A
 	MID_POWER_PROFILE_SETTINGS_NP          = 0xC00B
@@ -141,10 +141,13 @@ const (
 	FLAG_UNICAST    = 1 << 2 // flagField[0]
 )
 
-// Notification Events
+// Notification Events (from linuxptp notification.h)
 const (
-	NOTIFY_PORT_STATE = 1 << 0
-	NOTIFY_TIME_SYNC  = 1 << 1
+	NOTIFY_PORT_STATE      = 1 << 0 // Port state changes (PORT_DATA_SET notifications)
+	NOTIFY_TIME_SYNC       = 1 << 1 // Time synchronization events (TIME_STATUS_NP notifications)
+	NOTIFY_PARENT_DATA_SET = 1 << 2 // Parent data set changes (PARENT_DATA_SET notifications)
+	// Additional notification types that may be available:
+	// NOTIFY_CMLDS = 1 << 3            // CMLDS events
 )
 
 // Core PTP Data Types
@@ -274,6 +277,18 @@ type GrandmasterSettingsNP struct {
 type ExternalGrandmasterPropertiesNP struct {
 	GmIdentity   ClockIdentity
 	StepsRemoved uint16
+}
+
+// Time Status (Non-standard) - contains timing synchronization information
+type TimeStatusNP struct {
+	MasterOffset               int64         // Offset from master in nanoseconds
+	IngressTime                int64         // Ingress timestamp in nanoseconds
+	CumulativeScaledRateOffset int32         // Cumulative scaled rate offset
+	ScaledLastGmPhaseChange    int32         // Scaled last GM phase change
+	GmTimeBaseIndicator        uint16        // GM time base indicator
+	LastGmPhaseChange          ClockIdentity // Last GM phase change
+	GmPresent                  bool          // GM present flag
+	GmIdentity                 ClockIdentity // GM identity
 }
 
 // Port Properties (Non-standard)
