@@ -1,5 +1,5 @@
 # ptp4l management client in golang #
-This is an experimental project written with the help of Cursor AI editor. It implements PTP management client in go language
+This is an experimental project written with the help of Cursor AI editor. It implements a simple and limited PTP management client in go language
 
 ## Build ##
 ```bash
